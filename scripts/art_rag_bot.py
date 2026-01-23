@@ -15,7 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Replace with your actual bot token
-TOKEN: Final = "8550870558:AAFwSN5DDgR2VlgF3tHj1RtiSaRxXd3BVrM"
+TOKEN: Final = "TOKEN"
 BOT_USERNAME: Final = "@art_rag_bot"
 
 # Load your JSON data
@@ -248,4 +248,5 @@ if __name__ == '__main__':
     
     # Start polling
     print('🤖 Bot is polling...')
+
     app.run_polling(poll_interval=3, drop_pending_updates=True)
