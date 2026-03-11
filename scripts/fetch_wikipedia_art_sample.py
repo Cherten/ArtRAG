@@ -1,113 +1,82 @@
-from __future__ import annotations
-
-import argparse
 import json
-from pathlib import Path
-from typing import Iterable, List
-
+import logging
+import os
+import re
 from datasets import load_dataset
+from tqdm import tqdm
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-KEYWORDS = ("painting", "painter", "art", "sculpture", "museum", "gallery")
-DEFAULT_SPLIT = "train[:0.02%]"
-RAW_PATH = Path("data/raw/wikipedia_art_sample.jsonl")
-CHUNKS_PATH = Path("data/processed/chunks_sample.jsonl")
+ART_KEYWORDS = [
+    "painting", "painter", "artist", "sculpture", "sculptor",
+    "art movement", "renaissance", "baroque", "impressionism",
+    "cubism", "surrealism", "abstract art", "portrait", "landscape"
+]
 
+def is_art_related(title, text):
+    combined = (title + " " + text[:2000]).lower()
+    return any(re.search(rf"\b{kw}\b", combined) for kw in ART_KEYWORDS)
 
-def ensure_dirs() -> None:
-    RAW_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CHUNKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-
-def chunk_text(text: str, max_chars: int = 500) -> List[str]:
+def chunk_text(text, chunk_size=500):
     words = text.split()
-    chunks: List[str] = []
-    buf: List[str] = []
-    size = 0
+    chunks = []
+    current_chunk = []
+    current_len = 0
     for word in words:
-        word_len = len(word) + 1  # include space
-        if buf and size + word_len > max_chars:
-            chunks.append(" ".join(buf).strip())
-            buf = [word]
-            size = len(word)
-        else:
-            buf.append(word)
-            size += word_len
-    if buf:
-        chunks.append(" ".join(buf).strip())
-    return [c for c in chunks if c]
+        current_chunk.append(word)
+        current_len += len(word) + 1
+        if current_len >= chunk_size:
+            chunks.append(" ".join(current_chunk))
+            current_chunk = []
+            current_len = 0
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+    return chunks
 
+def main(limit=100000, language="20220301.en"):
+    logger.info(f"Загрузка датасета wikipedia/{language}...")
+    dataset = load_dataset("wikipedia", language, split="train")
 
-def save_jsonl(rows: Iterable[dict], path: Path) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if limit > 0:
+        dataset = dataset.shuffle(seed=42).select(range(limit))
 
+    art_articles = []
+    all_chunks = []
 
-def main(sample_split: str = DEFAULT_SPLIT, max_chars: int = 500) -> None:
-    ensure_dirs()
-    ds = load_dataset(
-        "legacy-datasets/wikipedia",
-        "20220301.en",
-        split=sample_split,
-        trust_remote_code=True,
-    )
-
-    def keep(row: dict) -> bool:
-        text = (row.get("title", "") + " " + row.get("text", "")).lower()
-        return any(k in text for k in KEYWORDS)
-
-    filtered = ds.filter(keep)
-
-    raw_rows = [
-        {
-            "id": row["id"],
-            "title": row["title"],
-            "source_url": row.get("url"),
-            "text": row["text"],
-        }
-        for row in filtered
-    ]
-    save_jsonl(raw_rows, RAW_PATH)
-
-    chunk_rows = []
-    for row in filtered:
-        chunks = chunk_text(row["text"], max_chars=max_chars)
-        for idx, chunk in enumerate(chunks):
-            chunk_rows.append(
-                {
-                    "doc_id": row["id"],
-                    "chunk_id": f"{row['id']}_{idx}",
+    logger.info("Фильтрация статей об искусстве и чанкинг...")
+    for idx, article in enumerate(tqdm(dataset)):
+        title = article["title"]
+        text = article["text"]
+        if is_art_related(title, text):
+            art_articles.append({
+                "id": article["id"],
+                "title": title,
+                "url": article["url"],
+                "text": text
+            })
+            for cid, chunk in enumerate(chunk_text(text)):
+                all_chunks.append({
+                    "doc_id": article["id"],
+                    "chunk_id": cid,
+                    "title": title,
                     "content": chunk,
-                    "source_url": row.get("url"),
-                }
-            )
-    save_jsonl(chunk_rows, CHUNKS_PATH)
+                    "url": article["url"]
+                })
 
-    print(f"Saved {len(raw_rows)} raw docs to {RAW_PATH}")
-    print(f"Saved {len(chunk_rows)} chunks to {CHUNKS_PATH}")
+    os.makedirs("data/raw", exist_ok=True)
+    with open("data/raw/wikipedia_art_sample.jsonl", "w") as f:
+        for a in art_articles:
+            f.write(json.dumps(a) + "\n")
 
+    os.makedirs("data/processed", exist_ok=True)
+    with open("data/processed/chunks_sample.jsonl", "w") as f:
+        for c in all_chunks:
+            f.write(json.dumps(c) + "\n")
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Fetch Wikipedia art subset, filter, and chunk for RAG."
-    )
-    parser.add_argument(
-        "--split",
-        dest="sample_split",
-        default=DEFAULT_SPLIT,
-        help="HF split to load (e.g., 'train', 'train[:1%]', default train[:0.02%]).",
-    )
-    parser.add_argument(
-        "--max-chars",
-        type=int,
-        default=500,
-        help="Max characters per chunk (length-based split).",
-    )
-    return parser.parse_args()
-
+    logger.info(f"Сохранено статей: {len(art_articles)}, чанков: {len(all_chunks)}")
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(sample_split=args.sample_split, max_chars=args.max_chars)
-
+    import sys
+    limit = int(sys.argv[1]) if len(sys.argv) > 1 else 100000
+    main(limit=limit)
